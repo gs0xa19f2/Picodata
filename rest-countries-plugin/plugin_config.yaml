@@ -1,0 +1,3 @@
+countries_service:
+  timeout: 10
+  ttl: 86400

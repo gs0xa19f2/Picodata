@@ -1,0 +1,14 @@
+name: countries_cache
+description: Transparent cache for restcountries.com API
+version: {{ version }}
+services:
+  - name: countries_service
+    description: This service provides HTTP route for a transparent countries cache
+    default_configuration:
+      ttl: 86400
+      timeout: 10
+migration:
+{% for migration in migrations -%}
+    - {{ migration }}
+{%- endfor %}
+

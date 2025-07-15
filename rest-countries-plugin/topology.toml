@@ -1,0 +1,6 @@
+[tier.default]
+replicasets = 1
+replication_factor = 1
+
+[plugin.countries_cache.service.countries_service]
+tiers = ["default"]

@@ -1,0 +1,12 @@
+-- pico.UP
+CREATE TABLE "countries" (
+    country_name TEXT NOT NULL,
+    response_data TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (country_name)
+)
+USING memtx
+DISTRIBUTED BY (country_name);
+
+-- pico.DOWN
+DROP TABLE "countries";
