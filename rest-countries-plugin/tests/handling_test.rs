@@ -1,37 +1,28 @@
 use picotest::*;
-use std::time::Duration;
-use tokio::runtime::Runtime;
+mod common;
+use common::test_ctx;
 
 #[picotest]
-fn test_error_handling() {
-    let rt = Runtime::new().unwrap();
-
-    let host = "localhost";
-    let http_port = 8001;
-
-    // Запрос с пустым именем страны
-    let response = rt.block_on(async {
-        let client = reqwest::Client::new();
-        let base_url = format!("http://{}:{}", host, http_port);
-
-        let response = client
-            .post(&format!("{}/country", base_url))
-            .header("Content-Type", "application/json")
-            .body(r#"{"name":""}"#)
-            .timeout(Duration::from_secs(10))
-            .send()
-            .await
-            .expect("Failed to send request");
-
-        let status = response.status().as_u16();
-        let text = response.text().await.expect("Failed to get response text");
-
-        (status, text)
+fn test_error_handling(test_ctx: &common::TestContext) {
+    // Пустое имя страны
+    let response = test_ctx.rt.block_on(async {
+        let url = format!("{}/name?name=", test_ctx.base_url);
+        test_ctx.client.get(&url).send().await.unwrap()
     });
+    assert_eq!(response.status().as_u16(), 400);
+    let text = test_ctx
+        .rt
+        .block_on(async { response.text().await.unwrap() });
+    assert!(text.contains("Country name is required"));
 
-    // Должны получить ошибку
-    assert_eq!(response.0, 500);
-
-    // Проверяем текст ошибки
-    assert!(response.1.contains("Country name is required"));
+    // Несуществующая страна
+    let response = test_ctx.rt.block_on(async {
+        let url = format!("{}/name?name=nonexistentcountry", test_ctx.base_url);
+        test_ctx.client.get(&url).send().await.unwrap()
+    });
+    assert_eq!(response.status().as_u16(), 500);
+    let text = test_ctx
+        .rt
+        .block_on(async { response.text().await.unwrap() });
+    assert!(text.contains("Upstream API returned non-OK status"));
 }

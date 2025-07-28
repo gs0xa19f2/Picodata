@@ -1,30 +1,41 @@
+use crate::COUNTRIES_URL;
+use fibreq::{Client, ClientBuilder};
+use once_cell::unsync::Lazy;
 use serde_json::Value;
-use std::{error::Error, time::Duration};
+use std::error::Error;
 
-static COUNTRIES_URL: once_cell::sync::Lazy<String> = once_cell::sync::Lazy::new(|| {
-    std::env::var("COUNTRIES_URL").unwrap_or(String::from("https://restcountries.com"))
-});
+thread_local! {
+    static CLIENT: Lazy<Client> = Lazy::new(|| {
+        ClientBuilder::new().build()
+    })
+}
 
-pub fn countries_request(
-    country_name: &str,
-    request_timeout: u64,
-) -> Result<String, Box<dyn Error>> {
-    let http_client = fibreq::ClientBuilder::new().build();
-    let url = format!(
-        "{url}/v3.1/name/{name}",
-        url = COUNTRIES_URL.as_str(),
-        name = country_name
-    );
+pub fn countries_request(country_name: &str) -> Result<String, Box<dyn Error>> {
+    CLIENT.with(|http_client| {
+        COUNTRIES_URL.with(|url_cell| {
+            let url = format!(
+                "{url}/v3.1/name/{name}",
+                url = url_cell.borrow(),
+                name = country_name
+            );
 
-    let http_req = http_client.get(url)?;
+            let http_req = http_client.get(url)?;
+            let mut http_resp = http_req.send()?;
 
-    let mut http_resp = http_req
-        .request_timeout(Duration::from_secs(request_timeout))
-        .send()?;
+            let status = http_resp.status();
+            let resp_body = http_resp.text()?;
 
-    let resp_body = http_resp.text()?;
+            if status != 200 {
+                return Err(format!(
+                    "Upstream API returned non-OK status: {}. Body: {}",
+                    status, resp_body
+                )
+                .into());
+            }
 
-    let _: Value = serde_json::from_str(&resp_body)?;
+            let _: Value = serde_json::from_str(&resp_body)?;
 
-    Ok(resp_body)
+            Ok(resp_body)
+        })
+    })
 }

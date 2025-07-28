@@ -1,19 +1,16 @@
-use reqwest;
+use crate::common::TestContext;
 use std::time::Duration;
 
 /// Создает запрос к API плагина для получения информации о стране
 pub async fn get_country_info(
-    host: &str,
-    port: u16,
+    test_ctx: &TestContext,
     country_name: &str,
 ) -> Result<String, Box<dyn std::error::Error>> {
-    let client = reqwest::Client::new();
-    let base_url = format!("http://{}:{}", host, port);
+    let url = format!("{}/name?name={}", test_ctx.base_url, country_name);
 
-    let response = client
-        .post(&format!("{}/country", base_url))
-        .header("Content-Type", "application/json")
-        .body(format!(r#"{{"name":"{}"}}"#, country_name))
+    let response = test_ctx
+        .client
+        .get(&url)
         .timeout(Duration::from_secs(10))
         .send()
         .await?;

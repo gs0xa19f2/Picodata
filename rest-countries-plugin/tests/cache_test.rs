@@ -1,20 +1,22 @@
 use picotest::*;
-use serde_json::Value;
 use std::time::{Duration, Instant};
-use tokio::runtime::Runtime;
 
+mod common;
+use common::test_ctx;
 mod helpers;
 use helpers::get_country_info;
 
+/// Вспомогательная функция для извлечения значения count из табличного вывода picotest
+fn get_count_from_output(output: &str) -> Option<i64> {
+    output
+        .lines()
+        .find(|line| line.starts_with('|') && line.contains('|') && !line.contains("count"))
+        .and_then(|line| line.split('|').nth(1))
+        .and_then(|value| value.trim().parse::<i64>().ok())
+}
+
 #[picotest]
-fn test_cache_miss_and_hit() {
-    // Создаем runtime для асинхронных операций
-    let rt = Runtime::new().unwrap();
-
-    let host = "localhost";
-    let http_port = 8001;
-
-    // Очищаем кеш, если там уже есть данные
+fn test_cache_miss_and_hit(test_ctx: &common::TestContext) {
     let country = "germany";
     let _ = cluster
         .run_query(&format!(
@@ -23,14 +25,14 @@ fn test_cache_miss_and_hit() {
         ))
         .expect("Failed to execute delete query");
 
-    // Должен быть промах кеша
+    // Должен быть промах кеша (первый запрос)
     let start = Instant::now();
-    let first_response =
-        rt.block_on(async { get_country_info(host, http_port, country).await.unwrap() });
+    let first_response = test_ctx
+        .rt
+        .block_on(async { get_country_info(test_ctx, country).await.unwrap() });
     let first_duration = start.elapsed();
 
-    // Проверяем, что данные появились в кеше
-    // Вместо парсинга проверяем напрямую количество записей
+    // Корректно парсим вывод и проверяем значение
     let cache_query_result = cluster
         .run_query(&format!(
             "SELECT COUNT(*) as count FROM countries WHERE country_name = '{}'",
@@ -38,45 +40,62 @@ fn test_cache_miss_and_hit() {
         ))
         .expect("Failed to execute count query");
 
-    // Проверка на наличие записей в кеше
-    assert!(cache_query_result.contains("count"));
+    let count = get_count_from_output(&cache_query_result)
+        .expect("Failed to parse count from query output");
+    assert_eq!(
+        count, 1,
+        "Expected count to be 1, but got: {}",
+        cache_query_result
+    );
 
-    // Должно быть попадание в кеш
+    // Получаем timestamp после первой записи в кеш
+    let first_timestamp_query_result = cluster
+        .run_query(&format!(
+            "SELECT created_at FROM countries WHERE country_name = '{}'",
+            country
+        ))
+        .expect("Failed to get timestamp after first request");
+
+    // Должно быть попадание в кеш (второй запрос)
     let start = Instant::now();
-    let second_response =
-        rt.block_on(async { get_country_info(host, http_port, country).await.unwrap() });
+    let second_response = test_ctx
+        .rt
+        .block_on(async { get_country_info(test_ctx, country).await.unwrap() });
     let second_duration = start.elapsed();
+
+    // Получаем timestamp после второго запроса
+    let second_timestamp_query_result = cluster
+        .run_query(&format!(
+            "SELECT created_at FROM countries WHERE country_name = '{}'",
+            country
+        ))
+        .expect("Failed to get timestamp after second request");
+
+    // Убеждаемся, что timestamp не изменился
+    assert_eq!(
+        first_timestamp_query_result, second_timestamp_query_result,
+        "Cache entry was updated on cache hit, but it should not have been."
+    );
 
     // Проверяем, что ответы идентичны
     assert_eq!(first_response, second_response);
-
-    println!("First request time: {:?}", first_duration);
-    println!("Second request time: {:?}", second_duration);
+    println!("First request (miss) time: {:?}", first_duration);
+    println!("Second request (hit) time: {:?}", second_duration);
 }
 
 #[picotest]
-fn test_ttl_expiration() {
-    let rt = Runtime::new().unwrap();
-
-    let host = "localhost";
-    let http_port = 8001;
-
-    // Изменяем конфигурацию на малый TTL
+fn test_ttl_expiration(test_ctx: &common::TestContext) {
+    // ttl in seconds
     let plugin_config_yaml = r#"
     countries_service:
       ttl: 5
-      timeout: 10
     "#;
-
-    // Используем явный тип PluginConfigMap для конфигурации плагина
     let plugin_config: PluginConfigMap = serde_yaml::from_str(plugin_config_yaml).unwrap();
-
     cluster
         .apply_config(plugin_config)
         .expect("Failed to apply config");
 
     let country = "france";
-
     let _ = cluster
         .run_query(&format!(
             "DELETE FROM countries WHERE country_name = '{}'",
@@ -85,53 +104,48 @@ fn test_ttl_expiration() {
         .expect("Failed to execute delete query");
 
     // Кеширование данных
-    let first_response =
-        rt.block_on(async { get_country_info(host, http_port, country).await.unwrap() });
+    let _ = test_ctx
+        .rt
+        .block_on(async { get_country_info(test_ctx, country).await.unwrap() });
 
-    // Проверяем, что данные появились в кеше
+    // Проверяем, что в кеше появилась ровно одна запись
     let cache_query_result = cluster
         .run_query(&format!(
             "SELECT COUNT(*) as count FROM countries WHERE country_name = '{}'",
             country
         ))
         .expect("Failed to execute count query");
+    let count_after_caching = get_count_from_output(&cache_query_result)
+        .expect("Failed to parse count from query output after caching");
+    assert_eq!(
+        count_after_caching, 1,
+        "Expected count to be 1 after caching, but got: {}",
+        cache_query_result
+    );
 
-    // Проверка на наличие записей в кеше
-    assert!(cache_query_result.contains("count"));
-    assert!(!cache_query_result.contains("count: 0"));
+    let wait_timeout = Instant::now() + Duration::from_secs(10);
+    loop {
+        let query_result = cluster
+            .run_query(&format!(
+                "SELECT COUNT(*) as count FROM countries WHERE country_name = '{}'",
+                country
+            ))
+            .expect("Failed to execute count query during wait");
 
-    // Ждем, пока TTL истечет
-    std::thread::sleep(Duration::from_secs(7));
-
-    // Проверяем, что данные исчезли из кеша
-    let cache_query_result = cluster
-        .run_query(&format!(
-            "SELECT COUNT(*) as count FROM countries WHERE country_name = '{}'",
-            country
-        ))
-        .expect("Failed to execute count query");
-
-    if !cache_query_result.contains("count: 0") {
-        println!("Warning: TTL worker might not have removed the cache entry yet");
-    }
-
-    // Делаем новый запрос к API
-    let second_response =
-        rt.block_on(async { get_country_info(host, http_port, country).await.unwrap() });
-
-    // Ответы должны быть примерно одинаковыми
-    let first_json: Value = serde_json::from_str(&first_response).unwrap();
-    let second_json: Value = serde_json::from_str(&second_response).unwrap();
-
-    // Проверяем ключевые поля
-    if let (Some(first_countries), Some(second_countries)) =
-        (first_json.as_array(), second_json.as_array())
-    {
-        if !first_countries.is_empty() && !second_countries.is_empty() {
-            assert_eq!(
-                first_countries[0]["name"]["common"],
-                second_countries[0]["name"]["common"]
-            );
+        if let Some(count) = get_count_from_output(&query_result) {
+            if count == 0 {
+                break;
+            }
         }
+
+        if Instant::now() > wait_timeout {
+            panic!("Timeout expired while waiting for cache entry to be deleted");
+        }
+
+        std::thread::sleep(Duration::from_millis(200));
     }
+
+    let _ = test_ctx
+        .rt
+        .block_on(async { get_country_info(test_ctx, country).await.unwrap() });
 }

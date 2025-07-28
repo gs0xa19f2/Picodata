@@ -1,3 +1,4 @@
 countries_service:
   timeout: 10
+  # ttl in seconds
   ttl: 86400

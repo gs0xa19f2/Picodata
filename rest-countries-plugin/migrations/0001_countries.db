@@ -8,5 +8,7 @@ CREATE TABLE "countries" (
 USING memtx
 DISTRIBUTED BY (country_name);
 
+CREATE INDEX "idx_countries_created_at" ON "countries" (created_at);
+
 -- pico.DOWN
 DROP TABLE "countries";
